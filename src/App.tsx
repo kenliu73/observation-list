@@ -17,7 +17,12 @@ import { TopBar } from './components/TopBar';
 import { WatchlistModal } from './components/WatchlistModal';
 import { WatchlistSidebar } from './components/WatchlistSidebar';
 import type { EtfDetailResponse, EtfDirectoryItem, EtfQuote } from './types/etf';
-import { apiUrl } from './utils/api';
+import {
+  fetchEtfDetail,
+  fetchEtfDirectory,
+  fetchEtfQuotes,
+  isStaticDataMode,
+} from './utils/api';
 
 const DEFAULT_WATCHLIST = ['0050', '0056', '00878', '00919', '00929'];
 const STORAGE_KEY = 'tw-etf-watchlist-v1';
@@ -60,6 +65,7 @@ export default function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(getInitialTheme);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [staticMode, setStaticMode] = useState<boolean>(isStaticDataMode);
 
   // Sync theme class on <html> and persist preference
   useEffect(() => {
@@ -87,12 +93,12 @@ export default function App() {
 
   // Fetch TWSE ETF directory once
   useEffect(() => {
-    fetch(apiUrl('/api/etfs/directory'))
-      .then((r) => (r.ok ? r.json() : { items: [] }))
-      .then((data) => {
-        if (Array.isArray(data.items)) {
-          setDirectory(data.items);
+    fetchEtfDirectory()
+      .then((items) => {
+        if (Array.isArray(items)) {
+          setDirectory(items);
         }
+        if (isStaticDataMode()) setStaticMode(true);
       })
       .catch(() => {
         // Directory is non-blocking
@@ -103,18 +109,14 @@ export default function App() {
     if (codes.length === 0) return;
     setIsLoadingQuotes(true);
     try {
-      const url = apiUrl(
-        `/api/etfs/quotes?codes=${encodeURIComponent(codes.join(','))}${forceRefresh ? '&refresh=1' : ''}`
-      );
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('無法取得臺灣證券交易所即時報價（請確認後端 API 服務是否已啟動或已設定 VITE_API_BASE_URL）');
-      const data = (await res.json()) as { quotes: EtfQuote[]; fetchedAt: string };
+      const data = await fetchEtfQuotes(codes, forceRefresh);
       const nextMap: Record<string, EtfQuote> = {};
       for (const q of data.quotes || []) {
         nextMap[q.code] = q;
       }
       setQuotesMap((prev) => ({ ...prev, ...nextMap }));
       if (data.fetchedAt) setLastFetchedAt(data.fetchedAt);
+      if (data.isStatic) setStaticMode(true);
     } catch (err) {
       setErrorMsg((err as Error).message);
     } finally {
@@ -127,19 +129,13 @@ export default function App() {
     setIsLoadingDetail(true);
     setErrorMsg(null);
     try {
-      const url = apiUrl(
-        `/api/etfs/${encodeURIComponent(code)}/detail${forceRefresh ? '?refresh=1' : ''}`
-      );
-      const res = await fetch(url);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `無法載入 ${code} 的 ETF 資料（請確認後端 API 服務是否已連線）`);
-      }
-      const data = (await res.json()) as EtfDetailResponse;
+      const { detail: data, isStatic } = await fetchEtfDetail(code, forceRefresh);
       setDetail(data);
       setQuotesMap((prev) => ({ ...prev, [data.quote.code]: data.quote }));
       setLastFetchedAt(data.quote.fetchedAt);
+      if (isStatic) setStaticMode(true);
     } catch (err) {
+      setDetail((prev) => (prev?.quote.code === code ? prev : null));
       setErrorMsg((err as Error).message);
     } finally {
       setIsLoadingDetail(false);
@@ -154,13 +150,14 @@ export default function App() {
     fetchDetail(selectedCode);
   }, [selectedCode, fetchDetail]);
 
-  // Auto-refresh live TWSE quotes every 60s
+  // Auto-refresh live TWSE quotes every 60s when connected to backend API
   useEffect(() => {
+    if (staticMode) return;
     const timer = setInterval(() => {
       fetchQuotes(watchlist);
     }, 60_000);
     return () => clearInterval(timer);
-  }, [watchlist, fetchQuotes]);
+  }, [watchlist, fetchQuotes, staticMode]);
 
   const handleManualRefresh = () => {
     setRefreshNonce((n) => n + 1);
@@ -214,8 +211,10 @@ export default function App() {
           {/* Workspace utility bar: refresh cadence note + Day/Night theme switch */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-              盤中每 60 秒自動更新 TWSE 即時報價
-              {lastFetchedAt ? ` · 最近抓取 ${lastFetchedAt}` : ''}
+              {staticMode
+                ? 'GitHub Actions 排程同步 TWSE / 投信資料快照'
+                : '盤中每 60 秒自動更新 TWSE 即時報價'}
+              {lastFetchedAt ? ` · 資料基準 ${lastFetchedAt}` : ''}
             </p>
 
             <div

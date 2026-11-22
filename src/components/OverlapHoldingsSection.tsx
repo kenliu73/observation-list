@@ -1,7 +1,7 @@
 import { ArrowUpDown, Check, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { EtfQuote, HoldingsCompareResponse } from '../types/etf';
-import { apiUrl } from '../utils/api';
+import { fetchHoldingsCompare } from '../utils/api';
 
 interface OverlapHoldingsSectionProps {
   watchlist: string[];
@@ -43,9 +43,12 @@ export function OverlapHoldingsSection({
     });
   }, [watchlist, selectedCode]);
 
+  const [skippedCodes, setSkippedCodes] = useState<string[]>([]);
+
   useEffect(() => {
     if (compareCodes.length < 2) {
       setData(null);
+      setSkippedCodes([]);
       return;
     }
 
@@ -53,22 +56,12 @@ export function OverlapHoldingsSection({
     setIsLoading(true);
     setErrorMsg(null);
 
-    const url = apiUrl(
-      `/api/etfs/holdings-compare?codes=${encodeURIComponent(compareCodes.join(','))}${
-        refreshNonce > 0 ? '&refresh=1' : ''
-      }`
-    );
-
-    fetch(url)
-      .then(async (res) => {
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || '無法取得重疊持股對比資料');
+    fetchHoldingsCompare(compareCodes, refreshNonce > 0)
+      .then((result) => {
+        if (!cancelled) {
+          setData(result.data);
+          setSkippedCodes(result.skippedCodes);
         }
-        return (await res.json()) as HoldingsCompareResponse;
-      })
-      .then((json) => {
-        if (!cancelled) setData(json);
       })
       .catch((err) => {
         if (!cancelled) setErrorMsg((err as Error).message);
@@ -445,6 +438,9 @@ export function OverlapHoldingsSection({
             {data.etfs
               .map((e) => `${e.code} (${e.dataDate || '最新申報'})`)
               .join(' · ')}
+            {skippedCodes.length > 0
+              ? `（未收錄完整持股快照：${skippedCodes.join('、')}）`
+              : ''}
           </p>
         </>
       ) : null}

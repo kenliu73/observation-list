@@ -3,6 +3,10 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: ['main']
+  schedule:
+    # Auto-sync TWSE / Yahoo / MoneyDJ data on trading days (Mon-Fri):
+    # 02:05, 04:05, 06:05 UTC = 10:05, 12:05, 14:05 Asia/Taipei
+    - cron: '5 2,4,6 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -36,7 +40,11 @@ jobs:
         env:
           VITE_BASE_PATH: '/${{ github.event.repository.name }}/'
           VITE_API_BASE_URL: '${{ vars.VITE_API_BASE_URL }}'
+          VITE_STATIC_DATA: '${{ vars.VITE_API_BASE_URL == "" && "true" || "false" }}'
         run: npm run build
+
+      - name: Generate live TWSE / Yahoo / MoneyDJ JSON snapshots
+        run: npx tsx scripts/build-static-data.ts
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
