@@ -1,0 +1,6 @@
+{
+  "name": "台股 ETF 即時觀測儀表板",
+  "description": "即時抓取臺灣證券交易所報價、可自訂觀察清單、還原均線走勢（半年線/年線）、12個月累計年度殖利率曲線、尚可用於配息空間與成分股產業分佈分析。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
