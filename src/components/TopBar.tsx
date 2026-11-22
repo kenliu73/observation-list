@@ -39,10 +39,10 @@ export function TopBar({ isRefreshing, onRefresh }: TopBarProps) {
             可配息空間
           </a>
           <a
-            href="#section-holdings"
+            href="#section-income-goal"
             className="hover:text-slate-900 dark:hover:text-white hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
-            成分股分佈
+            月領張數試算
           </a>
           <a
             href="#section-overlap"

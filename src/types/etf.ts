@@ -159,3 +159,24 @@ export interface HoldingsCompareResponse {
   pairwise: EtfPairwiseOverlap[];
 }
 
+export interface EtfDividendSummaryItem {
+  code: string;
+  name: string;
+  exchange: 'tse' | 'otc';
+  price: number;
+  quoteDate: string;
+  quoteTime: string;
+  isIntraday: boolean;
+  marketStatusLabel: string;
+  trailing12mDividend: number;
+  latestTtmYieldPct: number | null;
+  dividendFrequency: string | null;
+  payoutCount12m: number;
+  hasData: boolean;
+}
+
+export interface WatchlistDividendSummaryResponse {
+  items: EtfDividendSummaryItem[];
+  fetchedAt: string;
+}
+

@@ -4,6 +4,7 @@ import type {
   DividendPeriod,
   EtfDetailResponse,
   EtfDirectoryItem,
+  EtfDividendSummaryItem,
   EtfHoldingsSnapshot,
   EtfQuote,
   HoldingItem,
@@ -11,6 +12,7 @@ import type {
   PricePoint,
   RollingYieldPoint,
   SectorItem,
+  WatchlistDividendSummaryResponse,
 } from '../src/types/etf.ts';
 import { computeHoldingsCompare } from '../src/utils/holdingsCompare.ts';
 
@@ -1086,6 +1088,87 @@ async function fetchHoldingsSnapshot(rawCode: string, forceRefresh = false): Pro
 
   holdingsSnapshotCache.set(code, { value: snapshot, expiresAt: now + 10 * 60_000 });
   return snapshot;
+}
+
+export async function getWatchlistDividendSummaries(
+  codes: string[],
+  forceRefresh = false,
+  preloadedQuotes?: Map<string, EtfQuote>
+): Promise<WatchlistDividendSummaryResponse> {
+  const uniqueCodes = Array.from(
+    new Set(codes.map((c) => c.trim().toUpperCase()).filter(Boolean))
+  );
+  const fetchedAt = getTaipeiNowParts().formattedFull;
+  if (uniqueCodes.length === 0) {
+    return { items: [], fetchedAt };
+  }
+
+  const quoteByCode = new Map<string, EtfQuote>(preloadedQuotes);
+  const missingQuotes = uniqueCodes.filter((c) => !quoteByCode.has(c));
+  if (missingQuotes.length > 0) {
+    const fetchedQuotes = await fetchTwseQuotes(missingQuotes, forceRefresh);
+    for (const q of fetchedQuotes) {
+      quoteByCode.set(q.code, q);
+    }
+  }
+
+  const today = getTaipeiNowParts().dateStr;
+  const ttmWindowStart = addOneYearMinusOneDay(today);
+  const items: EtfDividendSummaryItem[] = [];
+  const concurrency = 5;
+
+  for (let i = 0; i < uniqueCodes.length; i += concurrency) {
+    const batch = uniqueCodes.slice(i, i + concurrency);
+    const batchResults = await Promise.all(
+      batch.map(async (code): Promise<EtfDividendSummaryItem | null> => {
+        const q = quoteByCode.get(code);
+        try {
+          const detail = await getEtfDetail(code, forceRefresh, q);
+          if (!detail) return null;
+          const payoutCount12m = detail.dividends.periods.filter(
+            (p) => p.exDate >= ttmWindowStart && p.exDate <= today && p.amount > 0
+          ).length;
+          return {
+            code: detail.quote.code,
+            name: detail.quote.name,
+            exchange: detail.quote.exchange,
+            price: detail.quote.price,
+            quoteDate: detail.quote.quoteDate,
+            quoteTime: detail.quote.quoteTime,
+            isIntraday: detail.quote.isIntraday,
+            marketStatusLabel: detail.quote.marketStatusLabel,
+            trailing12mDividend: detail.dividends.latestTtmDividend,
+            latestTtmYieldPct: detail.dividends.latestTtmYieldPct,
+            dividendFrequency: detail.distributable.dividendFrequency,
+            payoutCount12m,
+            hasData: true,
+          };
+        } catch {
+          if (!q) return null;
+          return {
+            code: q.code,
+            name: q.name,
+            exchange: q.exchange,
+            price: q.price,
+            quoteDate: q.quoteDate,
+            quoteTime: q.quoteTime,
+            isIntraday: q.isIntraday,
+            marketStatusLabel: q.marketStatusLabel,
+            trailing12mDividend: 0,
+            latestTtmYieldPct: null,
+            dividendFrequency: null,
+            payoutCount12m: 0,
+            hasData: false,
+          };
+        }
+      })
+    );
+    for (const r of batchResults) {
+      if (r) items.push(r);
+    }
+  }
+
+  return { items, fetchedAt };
 }
 
 export async function compareHoldings(codes: string[], forceRefresh = false): Promise<HoldingsCompareResponse> {

@@ -6,7 +6,7 @@ import {
   getEtfDirectory,
   getTaipeiNowParts,
 } from '../server/etfService.ts';
-import type { EtfQuote } from '../src/types/etf.ts';
+import type { EtfDividendSummaryItem, EtfQuote } from '../src/types/etf.ts';
 
 const POPULAR_DETAIL_CODES = [
   '0050',
@@ -95,6 +95,15 @@ async function run() {
 
   const targetDetails = POPULAR_DETAIL_CODES.filter((c) => quoteByCode.has(c));
   const availableDetailCodes: string[] = [];
+  const dividendSummaries: EtfDividendSummaryItem[] = [];
+  const today = getTaipeiNowParts().dateStr;
+  const oneYearAgoDt = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+  const ttmWindowStart = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(oneYearAgoDt);
   const concurrency = 5;
 
   console.log(`[static-data] Building detail snapshots for ${targetDetails.length} popular ETFs...`);
@@ -109,6 +118,24 @@ async function run() {
             path.join(detailsDir, `${code}.json`),
             JSON.stringify(detail)
           );
+          const payoutCount12m = detail.dividends.periods.filter(
+            (p) => p.exDate >= ttmWindowStart && p.exDate <= today && p.amount > 0
+          ).length;
+          dividendSummaries.push({
+            code: detail.quote.code,
+            name: detail.quote.name,
+            exchange: detail.quote.exchange,
+            price: detail.quote.price,
+            quoteDate: detail.quote.quoteDate,
+            quoteTime: detail.quote.quoteTime,
+            isIntraday: detail.quote.isIntraday,
+            marketStatusLabel: detail.quote.marketStatusLabel,
+            trailing12mDividend: detail.dividends.latestTtmDividend,
+            latestTtmYieldPct: detail.dividends.latestTtmYieldPct,
+            dividendFrequency: detail.distributable.dividendFrequency,
+            payoutCount12m,
+            hasData: true,
+          });
           return code;
         } catch (err) {
           console.warn(`[static-data] Failed ${code}:`, (err as Error).message);
@@ -120,6 +147,11 @@ async function run() {
       if (ok) availableDetailCodes.push(ok);
     }
   }
+
+  await fs.writeFile(
+    path.join(outRoot, 'dividend-summaries.json'),
+    JSON.stringify({ items: dividendSummaries, fetchedAt: generatedAt })
+  );
 
   await fs.writeFile(
     path.join(outRoot, 'manifest.json'),

@@ -14,6 +14,7 @@ import { HoldingsSection } from './components/HoldingsSection';
 import { OverlapHoldingsSection } from './components/OverlapHoldingsSection';
 import { PriceMovingAvgChart } from './components/PriceMovingAvgChart';
 import { TopBar } from './components/TopBar';
+import { WatchlistIncomeGoalSection } from './components/WatchlistIncomeGoalSection';
 import { WatchlistModal } from './components/WatchlistModal';
 import { WatchlistSidebar } from './components/WatchlistSidebar';
 import type { EtfDetailResponse, EtfDirectoryItem, EtfQuote } from './types/etf';
@@ -412,6 +413,14 @@ export default function App() {
               />
             </>
           ) : null}
+
+          <WatchlistIncomeGoalSection
+            watchlist={watchlist}
+            selectedCode={selectedCode}
+            quotesMap={quotesMap}
+            onSelectCode={setSelectedCode}
+            refreshNonce={refreshNonce}
+          />
 
           <OverlapHoldingsSection
             watchlist={watchlist}

@@ -1,9 +1,11 @@
 import type {
   EtfDetailResponse,
   EtfDirectoryItem,
+  EtfDividendSummaryItem,
   EtfHoldingsSnapshot,
   EtfQuote,
   HoldingsCompareResponse,
+  WatchlistDividendSummaryResponse,
 } from '../types/etf';
 import { computeHoldingsCompare } from './holdingsCompare';
 
@@ -13,6 +15,7 @@ const FORCE_STATIC = import.meta.env.VITE_STATIC_DATA === 'true';
 
 let staticDetected = FORCE_STATIC && API_BASE.length === 0;
 let cachedStaticQuotes: { quotes: EtfQuote[]; fetchedAt: string } | null = null;
+let cachedStaticSummaries: WatchlistDividendSummaryResponse | null = null;
 const cachedStaticDetails = new Map<string, EtfDetailResponse>();
 
 export function apiUrl(path: string): string {
@@ -249,3 +252,101 @@ export async function fetchHoldingsCompare(
     isStatic: true,
   };
 }
+
+export async function fetchWatchlistDividendSummaries(
+  codes: string[],
+  forceRefresh = false
+): Promise<{ items: EtfDividendSummaryItem[]; fetchedAt: string; isStatic: boolean }> {
+  const uniqueCodes = Array.from(
+    new Set(codes.map((c) => c.trim().toUpperCase()).filter(Boolean))
+  );
+  if (uniqueCodes.length === 0) {
+    return { items: [], fetchedAt: '', isStatic: staticDetected };
+  }
+
+  if (!staticDetected) {
+    try {
+      const url = apiUrl(
+        `/api/etfs/dividend-summary?codes=${encodeURIComponent(uniqueCodes.join(','))}${
+          forceRefresh ? '&refresh=1' : ''
+        }`
+      );
+      const res = await fetch(url);
+      if (res.ok) {
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const data = (await res.json()) as WatchlistDividendSummaryResponse;
+          return { ...data, isStatic: false };
+        }
+      }
+      if (!hasExternalApiBase() && res.status === 404) {
+        staticDetected = true;
+      } else {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || '無法取得觀察清單配息試算資料');
+      }
+    } catch (err) {
+      if (!hasExternalApiBase() && !staticDetected) {
+        staticDetected = true;
+      } else if (!staticDetected) {
+        throw err;
+      }
+    }
+  }
+
+  if (!cachedStaticSummaries || forceRefresh) {
+    const snap = await fetchJsonSafe<WatchlistDividendSummaryResponse>(
+      staticDataUrl('dividend-summaries.json', forceRefresh)
+    );
+    if (snap) {
+      cachedStaticSummaries = snap;
+    }
+  }
+
+  const byCode = new Map<string, EtfDividendSummaryItem>();
+  if (cachedStaticSummaries) {
+    for (const item of cachedStaticSummaries.items) {
+      byCode.set(item.code, item);
+    }
+  }
+
+  const missingCodes = uniqueCodes.filter((c) => !byCode.has(c));
+  if (missingCodes.length > 0 && !cachedStaticQuotes) {
+    const qSnap = await fetchJsonSafe<{ quotes: EtfQuote[]; fetchedAt: string }>(
+      staticDataUrl('quotes.json', forceRefresh)
+    );
+    if (qSnap) cachedStaticQuotes = qSnap;
+  }
+  if (missingCodes.length > 0 && cachedStaticQuotes) {
+    const quoteMap = new Map(cachedStaticQuotes.quotes.map((q) => [q.code, q]));
+    for (const c of missingCodes) {
+      const q = quoteMap.get(c);
+      if (q) {
+        byCode.set(c, {
+          code: q.code,
+          name: q.name,
+          exchange: q.exchange,
+          price: q.price,
+          quoteDate: q.quoteDate,
+          quoteTime: q.quoteTime,
+          isIntraday: q.isIntraday,
+          marketStatusLabel: q.marketStatusLabel,
+          trailing12mDividend: 0,
+          latestTtmYieldPct: null,
+          dividendFrequency: null,
+          payoutCount12m: 0,
+          hasData: false,
+        });
+      }
+    }
+  }
+
+  return {
+    items: uniqueCodes
+      .map((c) => byCode.get(c))
+      .filter((x): x is EtfDividendSummaryItem => Boolean(x)),
+    fetchedAt: cachedStaticSummaries?.fetchedAt || cachedStaticQuotes?.fetchedAt || '',
+    isStatic: true,
+  };
+}
+

@@ -7,6 +7,7 @@ import {
   getEtfDetail,
   getEtfDirectory,
   getTaipeiNowParts,
+  getWatchlistDividendSummaries,
 } from './server/etfService.ts';
 
 const PORT = process.env.APPLET_ID ? 3000 : Number(process.env.PORT) || 3000;
@@ -56,6 +57,18 @@ async function startServer() {
       }
       const data = await compareHoldings(codes, forceRefresh);
       res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get('/api/etfs/dividend-summary', async (req, res) => {
+    try {
+      const rawCodes = String(req.query.codes || '0050,0056,00878,00919,00929');
+      const forceRefresh = req.query.refresh === '1';
+      const codes = rawCodes.split(',').map((s) => s.trim()).filter(Boolean);
+      const summary = await getWatchlistDividendSummaries(codes, forceRefresh);
+      res.json(summary);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
