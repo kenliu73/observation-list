@@ -7,7 +7,7 @@ import {
   RotateCw,
   Sun,
 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { DistributableSection } from './components/DistributableSection';
 import { DividendYieldSection } from './components/DividendYieldSection';
 import { HoldingsSection } from './components/HoldingsSection';
@@ -151,14 +151,13 @@ export default function App() {
     fetchDetail(selectedCode);
   }, [selectedCode, fetchDetail]);
 
-  // Auto-refresh live TWSE quotes every 60s when connected to backend API
+  // Auto-refresh live quotes every 60s (both backend API and direct GitHub Pages browser mode)
   useEffect(() => {
-    if (staticMode) return;
     const timer = setInterval(() => {
       fetchQuotes(watchlist);
     }, 60_000);
     return () => clearInterval(timer);
-  }, [watchlist, fetchQuotes, staticMode]);
+  }, [watchlist, fetchQuotes]);
 
   const handleManualRefresh = () => {
     setRefreshNonce((n) => n + 1);
@@ -183,7 +182,48 @@ export default function App() {
     }
   };
 
-  const activeQuote = detail?.quote || quotesMap[selectedCode] || null;
+  const activeQuote = quotesMap[selectedCode] || detail?.quote || null;
+  const liveDetail = useMemo(() => {
+    if (!detail) return null;
+    if (!activeQuote || activeQuote.code !== detail.quote.code) return detail;
+
+    const updatedSeries = [...detail.priceSeries];
+    const last = updatedSeries[updatedSeries.length - 1];
+    if (last && activeQuote.price > 0) {
+      if (activeQuote.quoteDate > last.date) {
+        updatedSeries.push({
+          date: activeQuote.quoteDate,
+          close: Number(activeQuote.price.toFixed(2)),
+          ma120: last.ma120,
+          ma240: last.ma240,
+          isIntraday: activeQuote.isIntraday,
+        });
+      } else if (activeQuote.quoteDate === last.date) {
+        updatedSeries[updatedSeries.length - 1] = {
+          ...last,
+          close: Number(activeQuote.price.toFixed(2)),
+          isIntraday: activeQuote.isIntraday,
+        };
+      }
+    }
+
+    const ttmDiv = detail.dividends.latestTtmDividend;
+    const liveYield =
+      activeQuote.price > 0 && ttmDiv > 0
+        ? Number(((ttmDiv / activeQuote.price) * 100).toFixed(2))
+        : detail.dividends.latestTtmYieldPct;
+
+    return {
+      ...detail,
+      quote: activeQuote,
+      priceSeries: updatedSeries,
+      dividends: {
+        ...detail.dividends,
+        latestTtmYieldPct: liveYield,
+      },
+    };
+  }, [detail, activeQuote]);
+
   const isUp = (activeQuote?.change ?? 0) > 0;
   const isDown = (activeQuote?.change ?? 0) < 0;
 
@@ -213,9 +253,9 @@ export default function App() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
               {staticMode
-                ? 'GitHub Actions 排程同步 TWSE / 投信資料快照'
-                : '盤中每 60 秒自動更新 TWSE 即時報價'}
-              {lastFetchedAt ? ` · 資料基準 ${lastFetchedAt}` : ''}
+                ? '盤中每 60 秒自動更新即時報價（線圖與成分股為 GitHub 快照）'
+                : '盤中每 60 秒自動更新 TWSE / 即時報價'}
+              {lastFetchedAt ? ` · 最近抓取 ${lastFetchedAt}` : ''}
             </p>
 
             <div
@@ -359,9 +399,9 @@ export default function App() {
                   <div>
                     <span className="text-slate-500 dark:text-slate-400 block">近 12 月殖利率</span>
                     <span className="font-mono text-sm font-semibold text-blue-700 dark:text-blue-400 mt-0.5 block">
-                      {detail?.dividends.latestTtmYieldPct !== null &&
-                      detail?.dividends.latestTtmYieldPct !== undefined
-                        ? `${detail.dividends.latestTtmYieldPct.toFixed(2)}%`
+                      {liveDetail?.dividends.latestTtmYieldPct !== null &&
+                      liveDetail?.dividends.latestTtmYieldPct !== undefined
+                        ? `${liveDetail.dividends.latestTtmYieldPct.toFixed(2)}%`
                         : '—'}
                     </span>
                   </div>
@@ -376,7 +416,7 @@ export default function App() {
             )}
           </section>
 
-          {isLoadingDetail && (!detail || detail.quote.code !== selectedCode) ? (
+          {isLoadingDetail && (!liveDetail || liveDetail.quote.code !== selectedCode) ? (
             <div className="space-y-6">
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 h-[420px] animate-pulse">
                 <div className="h-6 w-48 bg-slate-100 dark:bg-slate-800 rounded mb-4" />
@@ -387,29 +427,29 @@ export default function App() {
                 <div className="h-[220px] bg-slate-100 dark:bg-slate-800 rounded" />
               </div>
             </div>
-          ) : detail ? (
+          ) : liveDetail ? (
             <>
-              <PriceMovingAvgChart quote={detail.quote} priceSeries={detail.priceSeries} />
+              <PriceMovingAvgChart quote={liveDetail.quote} priceSeries={liveDetail.priceSeries} />
 
               <DividendYieldSection
-                code={detail.quote.code}
-                periods={detail.dividends.periods}
-                rolling12mYield={detail.dividends.rolling12mYield}
-                annual12mYield={detail.dividends.annual12mYield}
-                latestTtmDividend={detail.dividends.latestTtmDividend}
-                latestTtmYieldPct={detail.dividends.latestTtmYieldPct}
+                code={liveDetail.quote.code}
+                periods={liveDetail.dividends.periods}
+                rolling12mYield={liveDetail.dividends.rolling12mYield}
+                annual12mYield={liveDetail.dividends.annual12mYield}
+                latestTtmDividend={liveDetail.dividends.latestTtmDividend}
+                latestTtmYieldPct={liveDetail.dividends.latestTtmYieldPct}
               />
 
               <DistributableSection
-                quote={detail.quote}
-                distributable={detail.distributable}
+                quote={liveDetail.quote}
+                distributable={liveDetail.distributable}
               />
 
               <HoldingsSection
-                code={detail.quote.code}
-                dataDate={detail.holdings.dataDate}
-                sectors={detail.holdings.sectors}
-                items={detail.holdings.items}
+                code={liveDetail.quote.code}
+                dataDate={liveDetail.holdings.dataDate}
+                sectors={liveDetail.holdings.sectors}
+                items={liveDetail.holdings.items}
               />
             </>
           ) : null}

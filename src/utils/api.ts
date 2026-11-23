@@ -8,6 +8,7 @@ import type {
   WatchlistDividendSummaryResponse,
 } from '../types/etf';
 import { computeHoldingsCompare } from './holdingsCompare';
+import { fetchRealtimeCnyesQuotes } from './realtimeQuotes';
 
 const rawBase = import.meta.env.VITE_API_BASE_URL || '';
 const API_BASE = rawBase.replace(/\/+$/, '');
@@ -81,9 +82,9 @@ export async function fetchEtfQuotes(
       const url = apiUrl(
         `/api/etfs/quotes?codes=${encodeURIComponent(normalized.join(','))}${
           forceRefresh ? '&refresh=1' : ''
-        }`
+        }&_=${Date.now()}`
       );
-      const res = await fetch(url);
+      const res = await fetch(url, { cache: 'no-store' });
       if (res.ok) {
         const ct = res.headers.get('content-type') || '';
         if (ct.includes('application/json')) {
@@ -100,28 +101,75 @@ export async function fetchEtfQuotes(
       if (!hasExternalApiBase() && !staticDetected) {
         staticDetected = true;
       } else if (staticDetected) {
-        // Fall through to static snapshot below
+        // Fall through to static snapshot + live browser quote below
       } else {
         throw err;
       }
     }
   }
 
-  if (!cachedStaticQuotes || forceRefresh) {
-    const snap = await fetchJsonSafe<{ quotes: EtfQuote[]; fetchedAt: string }>(
-      staticDataUrl('quotes.json', forceRefresh)
-    );
-    if (!snap) {
-      throw new Error('尚未找到靜態報價資料（請確認 GitHub Actions 部署已完成）');
+  const [snapResult, rtMap] = await Promise.all([
+    !cachedStaticQuotes || forceRefresh
+      ? fetchJsonSafe<{ quotes: EtfQuote[]; fetchedAt: string }>(
+          staticDataUrl('quotes.json', forceRefresh)
+        ).then((s) => {
+          if (s) cachedStaticQuotes = s;
+          return s;
+        })
+      : Promise.resolve(cachedStaticQuotes),
+    fetchRealtimeCnyesQuotes(normalized),
+  ]);
+
+  const snapQuotes = snapResult || cachedStaticQuotes;
+  const staticByCode = new Map<string, EtfQuote>(
+    (snapQuotes?.quotes || []).map((q) => [q.code, q])
+  );
+
+  const mergedQuotes: EtfQuote[] = [];
+  let latestFetchedAt = snapQuotes?.fetchedAt || '';
+
+  for (const c of normalized) {
+    const base = staticByCode.get(c);
+    const rt = rtMap.get(c);
+    if (rt && rt.price > 0) {
+      latestFetchedAt = rt.fetchedAt || latestFetchedAt;
+      if (base) {
+        const estNav = base.estimatedNav;
+        mergedQuotes.push({
+          ...base,
+          price: rt.price,
+          prevClose: rt.prevClose > 0 ? rt.prevClose : base.prevClose,
+          open: rt.open ?? base.open,
+          high: rt.high ?? base.high,
+          low: rt.low ?? base.low,
+          change: rt.change,
+          changePct: rt.changePct,
+          volumeLots: rt.volumeLots > 0 ? rt.volumeLots : base.volumeLots,
+          premiumDiscountPct:
+            estNav && estNav > 0
+              ? Number((((rt.price - estNav) / estNav) * 100).toFixed(2))
+              : base.premiumDiscountPct,
+          quoteDate: rt.quoteDate,
+          quoteTime: rt.quoteTime,
+          isIntraday: rt.isIntraday,
+          marketStatusLabel: rt.marketStatusLabel,
+          fetchedAt: rt.fetchedAt,
+        });
+      } else {
+        mergedQuotes.push(rt);
+      }
+    } else if (base) {
+      mergedQuotes.push(base);
     }
-    cachedStaticQuotes = snap;
   }
 
-  const wanted = new Set(normalized);
-  const filtered = cachedStaticQuotes.quotes.filter((q) => wanted.has(q.code));
+  if (mergedQuotes.length === 0 && !snapQuotes) {
+    throw new Error('尚未找到報價資料（請確認網路連線或 GitHub Actions 部署已完成）');
+  }
+
   return {
-    quotes: filtered,
-    fetchedAt: cachedStaticQuotes.fetchedAt,
+    quotes: mergedQuotes,
+    fetchedAt: latestFetchedAt,
     isStatic: true,
   };
 }
@@ -135,9 +183,11 @@ export async function fetchEtfDetail(
   if (!staticDetected) {
     try {
       const url = apiUrl(
-        `/api/etfs/${encodeURIComponent(upper)}/detail${forceRefresh ? '?refresh=1' : ''}`
+        `/api/etfs/${encodeURIComponent(upper)}/detail${
+          forceRefresh ? '?refresh=1&' : '?'
+        }_=${Date.now()}`
       );
-      const res = await fetch(url);
+      const res = await fetch(url, { cache: 'no-store' });
       if (res.ok) {
         const ct = res.headers.get('content-type') || '';
         if (ct.includes('application/json')) {

@@ -15,6 +15,7 @@ import type {
   WatchlistDividendSummaryResponse,
 } from '../src/types/etf.ts';
 import { computeHoldingsCompare } from '../src/utils/holdingsCompare.ts';
+import { fetchRealtimeCnyesQuotes } from '../src/utils/realtimeQuotes.ts';
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -279,8 +280,9 @@ export async function fetchTwseQuotes(codes: string[], forceRefresh = false): Pr
   const chunkSize = 40;
   const rawItems: any[] = [];
 
-  const [navMap] = await Promise.all([
+  const [navMap, cnyesMap] = await Promise.all([
     getAllEtfNavMap(forceRefresh),
+    fetchRealtimeCnyesQuotes(uniqueCodes, 6000),
     (async () => {
       for (let i = 0; i < channels.length; i += chunkSize) {
         const chunk = channels.slice(i, i + chunkSize).join('|');
@@ -308,7 +310,8 @@ export async function fetchTwseQuotes(codes: string[], forceRefresh = false): Pr
     if (!code) continue;
 
     const prevClose = parseNum(item.y) ?? 0;
-    let price = parseNum(item.z);
+    const rawTradePrice = parseNum(item.z);
+    let price = rawTradePrice;
     if (price === null || price <= 0) {
       price = parseNum(item.pz);
     }
@@ -352,32 +355,80 @@ export async function fetchTwseQuotes(codes: string[], forceRefresh = false): Pr
     const existing = byCode.get(code);
     if (existing && (parseNum(item.v) ?? 0) === 0) continue;
 
+    const twseTs = `${quoteDate} ${quoteTime}`;
+    const rt = cnyesMap.get(code);
+    const useRt = Boolean(
+      rt &&
+        rt.price > 0 &&
+        (rawTradePrice === null ||
+          rawTradePrice <= 0 ||
+          `${rt.quoteDate} ${rt.quoteTime}` >= twseTs)
+    );
+
+    const activePrice = useRt && rt ? rt.price : finalPrice;
+    const activePrevClose = useRt && rt && rt.prevClose > 0 ? rt.prevClose : prevClose;
+    const activeChange = useRt && rt ? rt.change : change;
+    const activeChangePct = useRt && rt ? rt.changePct : changePct;
+
     byCode.set(code, {
       code,
-      name: cleanEtfName(String(item.n || navItem?.b || code)),
+      name: cleanEtfName(String(item.n || rt?.name || navItem?.b || code)),
       exchange: item.ex === 'otc' ? 'otc' : 'tse',
-      price: finalPrice,
-      prevClose,
-      open: parseNum(item.o),
-      high: parseNum(item.h),
-      low: parseNum(item.l),
-      change,
-      changePct,
-      volumeLots: parseNum(item.v) ?? 0,
+      price: activePrice,
+      prevClose: activePrevClose,
+      open: useRt && rt && rt.open !== null ? rt.open : parseNum(item.o),
+      high: useRt && rt && rt.high !== null ? rt.high : parseNum(item.h),
+      low: useRt && rt && rt.low !== null ? rt.low : parseNum(item.l),
+      change: activeChange,
+      changePct: activeChangePct,
+      volumeLots:
+        useRt && rt && rt.volumeLots > 0 ? rt.volumeLots : parseNum(item.v) ?? 0,
       estimatedNav: estNav,
       prevNav,
       premiumDiscountPct:
-        estNav && estNav > 0 ? Number((((finalPrice - estNav) / estNav) * 100).toFixed(2)) : parseNum(navItem?.g),
+        estNav && estNav > 0
+          ? Number((((activePrice - estNav) / estNav) * 100).toFixed(2))
+          : parseNum(navItem?.g),
       issuedUnits: parseNum(navItem?.c),
       unitDiff: parseNum(navItem?.d),
-      quoteDate,
-      quoteTime,
+      quoteDate: useRt && rt ? rt.quoteDate : quoteDate,
+      quoteTime: useRt && rt ? rt.quoteTime : quoteTime,
       navDate,
       navTime: navItem?.j ? String(navItem.j) : null,
-      isIntraday,
-      marketStatusLabel,
+      isIntraday: useRt && rt ? rt.isIntraday : isIntraday,
+      marketStatusLabel: useRt && rt ? rt.marketStatusLabel : marketStatusLabel,
       fetchedAt: taipeiNow.formattedFull,
     });
+  }
+
+  for (const code of uniqueCodes) {
+    if (!byCode.has(code)) {
+      const rt = cnyesMap.get(code);
+      if (rt) {
+        const navItem = navMap.get(code);
+        const estNav = parseNum(navItem?.f);
+        const prevNav = parseNum(navItem?.h);
+        const navDateRaw = String(navItem?.i || '');
+        const navDate =
+          navDateRaw.length === 8
+            ? `${navDateRaw.slice(0, 4)}-${navDateRaw.slice(4, 6)}-${navDateRaw.slice(6, 8)}`
+            : null;
+        byCode.set(code, {
+          ...rt,
+          name: cleanEtfName(rt.name || String(navItem?.b || code)),
+          estimatedNav: estNav,
+          prevNav,
+          premiumDiscountPct:
+            estNav && estNav > 0
+              ? Number((((rt.price - estNav) / estNav) * 100).toFixed(2))
+              : parseNum(navItem?.g),
+          issuedUnits: parseNum(navItem?.c),
+          unitDiff: parseNum(navItem?.d),
+          navDate,
+          navTime: navItem?.j ? String(navItem.j) : null,
+        });
+      }
+    }
   }
 
   return uniqueCodes.map((c) => byCode.get(c)).filter((x): x is EtfQuote => Boolean(x));
@@ -868,10 +919,19 @@ export async function getEtfDetail(
           };
         }
       }
+      const latestTtmDividend = cached.value.dividends.latestTtmDividend;
+      const latestTtmYieldPct =
+        freshQuote.price > 0 && latestTtmDividend > 0
+          ? Number(((latestTtmDividend / freshQuote.price) * 100).toFixed(2))
+          : cached.value.dividends.latestTtmYieldPct;
       return {
         ...cached.value,
         quote: freshQuote,
         priceSeries: updatedSeries,
+        dividends: {
+          ...cached.value.dividends,
+          latestTtmYieldPct,
+        },
       };
     }
     return cached.value;
