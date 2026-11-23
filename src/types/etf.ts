@@ -124,6 +124,7 @@ export interface EtfDetailResponse {
   distributable: DistributableInfo;
   holdings: {
     dataDate: string | null;
+    sectorsDate?: string | null;
     sectors: SectorItem[];
     items: HoldingItem[];
   };

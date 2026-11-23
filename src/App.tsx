@@ -448,8 +448,10 @@ export default function App() {
               <HoldingsSection
                 code={liveDetail.quote.code}
                 dataDate={liveDetail.holdings.dataDate}
+                sectorsDate={liveDetail.holdings.sectorsDate}
                 sectors={liveDetail.holdings.sectors}
                 items={liveDetail.holdings.items}
+                refreshNonce={refreshNonce}
               />
             </>
           ) : null}

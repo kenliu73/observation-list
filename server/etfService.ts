@@ -66,6 +66,7 @@ interface CacheEntry<T> {
 
 const directoryCache: { entry: CacheEntry<EtfDirectoryItem[]> | null } = { entry: null };
 const allEtfNavCache: { entry: CacheEntry<Map<string, any>> | null } = { entry: null };
+const stockCodeMapCache: { entry: CacheEntry<Map<string, string>> | null } = { entry: null };
 const detailCache = new Map<string, CacheEntry<EtfDetailResponse>>();
 const holdingsSnapshotCache = new Map<string, CacheEntry<EtfHoldingsSnapshot>>();
 
@@ -214,6 +215,78 @@ async function getAllEtfNavMap(forceRefresh = false): Promise<Map<string, any>> 
   }
   allEtfNavCache.entry = { value: map, expiresAt: now + 30_000 };
   return map;
+}
+
+function normalizeStockName(name: string): string {
+  return name.replace(/[\s　*＊]+/g, '').trim();
+}
+
+function parseMoneyDjSectionDate(html: string, elementSuffix: 'sdate2' | 'sdate3'): string | null {
+  if (!html) return null;
+  const idRe = new RegExp(`id="[^"]*${elementSuffix}"[^>]*>[^<]*?(\\d{4}\\/\\d{2}\\/\\d{2})`, 'i');
+  const idMatch = html.match(idRe);
+  if (idMatch) return idMatch[1].replace(/\//g, '-');
+  const allMatches = [...html.matchAll(/資料日期[：:]\s*(\d{4}\/\d{2}\/\d{2})/g)];
+  if (allMatches.length === 0) return null;
+  const picked = elementSuffix === 'sdate3' ? allMatches[allMatches.length - 1] : allMatches[0];
+  return picked[1].replace(/\//g, '-');
+}
+
+async function getTaiwanStockCodeMap(): Promise<Map<string, string>> {
+  const now = Date.now();
+  if (stockCodeMapCache.entry && stockCodeMapCache.entry.expiresAt > now) {
+    return stockCodeMapCache.entry.value;
+  }
+
+  const map = new Map<string, string>();
+  const [twseRes, tpexRes] = await Promise.all([
+    fetchWithTimeout('https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL', 10_000)
+      .then((r) => (r.ok ? r.json() : []))
+      .catch(() => []),
+    fetchWithTimeout('https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes', 10_000)
+      .then((r) => (r.ok ? r.json() : []))
+      .catch(() => []),
+  ]);
+
+  if (Array.isArray(twseRes)) {
+    for (const row of twseRes) {
+      const code = String(row?.Code || '').trim().toUpperCase();
+      const name = String(row?.Name || '').trim();
+      if (!code || !name || !/^(?:\d{4}[A-Z]?|00\d{2,4}[A-Z]?)$/.test(code)) continue;
+      if (!map.has(name)) map.set(name, code);
+      const norm = normalizeStockName(name);
+      if (norm && !map.has(norm)) map.set(norm, code);
+    }
+  }
+
+  if (Array.isArray(tpexRes)) {
+    for (const row of tpexRes) {
+      const code = String(row?.SecuritiesCompanyCode || '').trim().toUpperCase();
+      const name = String(row?.CompanyName || '').trim();
+      if (!code || !name || !/^(?:\d{4}[A-Z]?|00\d{2,4}[A-Z]?)$/.test(code)) continue;
+      if (!map.has(name)) map.set(name, code);
+      const norm = normalizeStockName(name);
+      if (norm && !map.has(norm)) map.set(norm, code);
+    }
+  }
+
+  if (map.size > 0) {
+    stockCodeMapCache.entry = { value: map, expiresAt: now + 12 * 3600_000 };
+  }
+  return map;
+}
+
+function resolveConstituentCode(
+  name: string,
+  tickerByName: Map<string, string>,
+  stockCodeMap: Map<string, string>
+): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  const direct = tickerByName.get(trimmed) ?? stockCodeMap.get(trimmed);
+  if (direct) return direct;
+  const norm = normalizeStockName(trimmed);
+  return tickerByName.get(norm) ?? stockCodeMap.get(norm) ?? null;
 }
 
 export async function getEtfDirectory(): Promise<EtfDirectoryItem[]> {
@@ -491,12 +564,13 @@ async function fetchTwseEtfDiv(code: string): Promise<{
 }
 
 async function fetchMoneyDjBasic(code: string) {
-  const [b4Html, b5Html, b6Html, b7Html, b7aHtml] = await Promise.all([
+  const [b4Html, b5Html, b6Html, b7Html, b7aHtml, stockCodeMap] = await Promise.all([
     fetchWithTimeout(`https://www.moneydj.com/ETF/X/Basic/Basic0004.xdjhtm?etfid=${code}.TW`).then((r) => (r.ok ? r.text() : '')).catch(() => ''),
     fetchWithTimeout(`https://www.moneydj.com/ETF/X/Basic/Basic0005.xdjhtm?etfid=${code}.TW`).then((r) => (r.ok ? r.text() : '')).catch(() => ''),
     fetchWithTimeout(`https://www.moneydj.com/ETF/X/Basic/Basic0006.xdjhtm?etfid=${code}.TW`).then((r) => (r.ok ? r.text() : '')).catch(() => ''),
     fetchWithTimeout(`https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid=${code}.TW`).then((r) => (r.ok ? r.text() : '')).catch(() => ''),
     fetchWithTimeout(`https://www.moneydj.com/ETF/X/Basic/Basic0007A.xdjhtm?etfid=${code}.TW`).then((r) => (r.ok ? r.text() : '')).catch(() => ''),
+    getTaiwanStockCodeMap(),
   ]);
 
   let dividendFrequency: string | null = null;
@@ -557,11 +631,14 @@ async function fetchMoneyDjBasic(code: string) {
         if (tds.length >= 3) {
           const rawLabel = tds[0];
           const codeM = rawLabel.match(/\(([0-9A-Za-z]+)\.TW[O]?\)/);
-          const stockCode = codeM ? codeM[1] : null;
           const cleanName = rawLabel.replace(/\([^)]+\)/g, '').trim();
+          const stockCode = (codeM ? codeM[1] : null) ?? resolveConstituentCode(cleanName, tickerByName, stockCodeMap);
           const weightPct = parseNum(tds[1]) ?? 0;
           const sharesRaw = parseNum(tds[2]);
-          if (cleanName && stockCode) tickerByName.set(cleanName, stockCode);
+          if (cleanName && stockCode) {
+            tickerByName.set(cleanName, stockCode);
+            tickerByName.set(normalizeStockName(cleanName), stockCode);
+          }
           if (cleanName && weightPct > 0) {
             fallbackHoldings.push({
               rank: rank++,
@@ -577,14 +654,16 @@ async function fetchMoneyDjBasic(code: string) {
     }
   }
 
-  let holdingsDate: string | null = null;
+  const b7HoldingsDate = parseMoneyDjSectionDate(b7Html, 'sdate3');
+  const b7SectorsDate = parseMoneyDjSectionDate(b7Html, 'sdate2');
+  const b7aHoldingsDate = parseMoneyDjSectionDate(b7aHtml, 'sdate3');
+  const b7aSectorsDate = parseMoneyDjSectionDate(b7aHtml, 'sdate2');
+
+  let sectorsDate: string | null = null;
   const sectors: SectorItem[] = [];
   const items: HoldingItem[] = [];
 
   if (b7aHtml) {
-    const dateM = b7aHtml.match(/資料日期[：:]\s*(\d{4}\/\d{2}\/\d{2})/);
-    if (dateM) holdingsDate = dateM[1].replace(/\//g, '-');
-
     const sectorTable = b7aHtml.match(/<table[^>]*id="[^"]*stable2"[\s\S]*?<\/table>/i);
     if (sectorTable) {
       const trs = sectorTable[0].match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
@@ -608,6 +687,7 @@ async function fetchMoneyDjBasic(code: string) {
           }
         }
       }
+      if (sectors.length > 0) sectorsDate = b7aSectorsDate;
     }
 
     const repeaterMatches = [
@@ -629,7 +709,7 @@ async function fetchMoneyDjBasic(code: string) {
           if (name && weightPct !== null && weightPct > 0) {
             items.push({
               rank: rank++,
-              code: tickerByName.get(name) ?? null,
+              code: resolveConstituentCode(name, tickerByName, stockCodeMap),
               name,
               sharesThousand,
               weightPct,
@@ -664,6 +744,7 @@ async function fetchMoneyDjBasic(code: string) {
           }
         }
       }
+      if (sectors.length > 0) sectorsDate = b7SectorsDate;
     }
   }
 
@@ -673,6 +754,10 @@ async function fetchMoneyDjBasic(code: string) {
     h.rank = i + 1;
   });
 
+  const holdingsDate = items.length > 0
+    ? (b7aHoldingsDate || b7HoldingsDate)
+    : (b7HoldingsDate || b7aHoldingsDate);
+
   return {
     dividendFrequency,
     expenseRatioPct,
@@ -681,6 +766,7 @@ async function fetchMoneyDjBasic(code: string) {
     mdjDivs,
     splitFactor,
     holdingsDate,
+    sectorsDate: sectorsDate || holdingsDate,
     sectors: sectors.sort((a, b) => b.weightPct - a.weightPct),
     items: finalHoldings,
   };
@@ -1022,6 +1108,7 @@ export async function getEtfDetail(
     distributable,
     holdings: {
       dataDate: mdj.holdingsDate,
+      sectorsDate: mdj.sectorsDate,
       sectors: mdj.sectors,
       items: mdj.items,
     },
@@ -1051,7 +1138,7 @@ async function fetchHoldingsSnapshot(rawCode: string, forceRefresh = false): Pro
     }
   }
 
-  const [navMap, b7Html, b7aHtml] = await Promise.all([
+  const [navMap, b7Html, b7aHtml, stockCodeMap] = await Promise.all([
     getAllEtfNavMap(forceRefresh),
     fetchWithTimeout(`https://www.moneydj.com/ETF/X/Basic/Basic0007.xdjhtm?etfid=${code}.TW`)
       .then((r) => (r.ok ? r.text() : ''))
@@ -1059,6 +1146,7 @@ async function fetchHoldingsSnapshot(rawCode: string, forceRefresh = false): Pro
     fetchWithTimeout(`https://www.moneydj.com/ETF/X/Basic/Basic0007A.xdjhtm?etfid=${code}.TW`)
       .then((r) => (r.ok ? r.text() : ''))
       .catch(() => ''),
+    getTaiwanStockCodeMap(),
   ]);
 
   const tickerByName = new Map<string, string>();
@@ -1075,11 +1163,14 @@ async function fetchHoldingsSnapshot(rawCode: string, forceRefresh = false): Pro
         if (tds.length >= 3) {
           const rawLabel = tds[0];
           const codeM = rawLabel.match(/\(([0-9A-Za-z]+)\.TW[O]?\)/);
-          const stockCode = codeM ? codeM[1] : null;
           const cleanName = rawLabel.replace(/\([^)]+\)/g, '').trim();
+          const stockCode = (codeM ? codeM[1] : null) ?? resolveConstituentCode(cleanName, tickerByName, stockCodeMap);
           const weightPct = parseNum(tds[1]) ?? 0;
           const sharesRaw = parseNum(tds[2]);
-          if (cleanName && stockCode) tickerByName.set(cleanName, stockCode);
+          if (cleanName && stockCode) {
+            tickerByName.set(cleanName, stockCode);
+            tickerByName.set(normalizeStockName(cleanName), stockCode);
+          }
           if (cleanName && weightPct > 0) {
             fallbackHoldings.push({
               rank: rank++,
@@ -1095,12 +1186,10 @@ async function fetchHoldingsSnapshot(rawCode: string, forceRefresh = false): Pro
     }
   }
 
-  let dataDate: string | null = null;
+  const b7HoldingsDate = parseMoneyDjSectionDate(b7Html, 'sdate3');
+  const b7aHoldingsDate = parseMoneyDjSectionDate(b7aHtml, 'sdate3');
   const items: HoldingItem[] = [];
   if (b7aHtml) {
-    const dateM = b7aHtml.match(/資料日期[：:]\s*(\d{4}\/\d{2}\/\d{2})/);
-    if (dateM) dataDate = dateM[1].replace(/\//g, '-');
-
     const repeaterMatches = [
       ...(b7aHtml.match(/<table[^>]*id="Repeater1"[\s\S]*?<\/table>/gi) || []),
       ...(b7aHtml.match(/<table[^>]*id="Repeater2"[\s\S]*?<\/table>/gi) || []),
@@ -1120,7 +1209,7 @@ async function fetchHoldingsSnapshot(rawCode: string, forceRefresh = false): Pro
           if (name && weightPct !== null && weightPct > 0) {
             items.push({
               rank: rank++,
-              code: tickerByName.get(name) ?? null,
+              code: resolveConstituentCode(name, tickerByName, stockCodeMap),
               name,
               sharesThousand,
               weightPct,
@@ -1137,6 +1226,10 @@ async function fetchHoldingsSnapshot(rawCode: string, forceRefresh = false): Pro
   finalItems.forEach((h, i) => {
     h.rank = i + 1;
   });
+
+  const dataDate = items.length > 0
+    ? (b7aHoldingsDate || b7HoldingsDate)
+    : (b7HoldingsDate || b7aHoldingsDate);
 
   const navItem = navMap.get(code);
   const snapshot: EtfHoldingsSnapshot = {

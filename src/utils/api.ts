@@ -174,6 +174,60 @@ export async function fetchEtfQuotes(
   };
 }
 
+export async function fetchConstituentQuotes(
+  codes: string[],
+  forceRefresh = false
+): Promise<{ quotes: Record<string, EtfQuote>; fetchedAt: string }> {
+  const validCodes = Array.from(
+    new Set(
+      codes
+        .map((c) => c.trim().toUpperCase())
+        .filter((c) => /^(?:\d{4,6}[A-Z]?|00\d{2,4}[A-Z]?)$/.test(c))
+    )
+  );
+  if (validCodes.length === 0) {
+    return { quotes: {}, fetchedAt: '' };
+  }
+
+  if (!staticDetected) {
+    try {
+      const url = apiUrl(
+        `/api/etfs/quotes?codes=${encodeURIComponent(validCodes.join(','))}${
+          forceRefresh ? '&refresh=1' : ''
+        }&_=${Date.now()}`
+      );
+      const res = await fetch(url, { cache: 'no-store' });
+      if (res.ok) {
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          const data = (await res.json()) as { quotes: EtfQuote[]; fetchedAt: string };
+          const map: Record<string, EtfQuote> = {};
+          for (const q of data.quotes || []) {
+            map[q.code] = q;
+          }
+          return { quotes: map, fetchedAt: data.fetchedAt || '' };
+        }
+      }
+      if (!hasExternalApiBase() && res.status === 404) {
+        staticDetected = true;
+      }
+    } catch {
+      if (!hasExternalApiBase() && !staticDetected) {
+        staticDetected = true;
+      }
+    }
+  }
+
+  const rtMap = await fetchRealtimeCnyesQuotes(validCodes);
+  const map: Record<string, EtfQuote> = {};
+  let latestFetchedAt = '';
+  for (const [code, q] of rtMap.entries()) {
+    map[code] = q;
+    if (q.fetchedAt) latestFetchedAt = q.fetchedAt;
+  }
+  return { quotes: map, fetchedAt: latestFetchedAt };
+}
+
 export async function fetchEtfDetail(
   code: string,
   forceRefresh = false
